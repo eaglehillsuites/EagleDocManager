@@ -1,0 +1,28 @@
+# EagleDocManager - Python Dependencies
+# Install with: pip install -r requirements.txt
+
+# Core PDF handling
+pypdf>=4.0.0
+pdf2image>=1.17.0
+
+# Barcode detection
+pyzbar>=0.1.9
+pylibdmtx>=0.1.10
+opencv-python>=4.9.0
+
+# Image processing
+Pillow>=10.0.0
+
+# File watching
+watchdog>=4.0.0
+
+# UI
+PySide6>=6.6.0
+
+# Gmail integration (optional - install if using Gmail features)
+google-api-python-client>=2.120.0
+google-auth-httplib2>=0.2.0
+google-auth-oauthlib>=1.2.0
+
+# Windows-specific (for printing)
+pywin32>=306; sys_platform == "win32"
