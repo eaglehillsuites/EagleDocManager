@@ -31,6 +31,8 @@ GMAIL_TOKEN_FILE = APP_DIR / "gmail_token.json"
 DEFAULT_CONFIG = {
     "tenant_root": "",
     "previous_tenants_path": "",
+    "building_files_path": "",
+    "qr_routes": {},
     "start_with_windows": False,
     "gmail_connected": False,
     "watched_folders": [],
@@ -240,6 +242,34 @@ def get_naming_profile(profile_id: str) -> dict | None:
         if p["id"] == profile_id:
             return p
     return None
+
+
+def get_qr_route(qr_value: str):
+    """Return the configured folder path for a custom QR code, or None."""
+    cfg = load_config()
+    return cfg.get("qr_routes", {}).get(qr_value)
+
+
+def save_qr_route(qr_value: str, folder_path: str):
+    """Persist a QR code to folder mapping."""
+    cfg = load_config()
+    routes = cfg.get("qr_routes", {})
+    routes[qr_value] = folder_path
+    cfg["qr_routes"] = routes
+    save_config(cfg)
+
+
+def delete_qr_route(qr_value: str):
+    cfg = load_config()
+    routes = cfg.get("qr_routes", {})
+    routes.pop(qr_value, None)
+    cfg["qr_routes"] = routes
+    save_config(cfg)
+
+
+def get_previous_tenant_csv() -> str:
+    """Return path to the previous tenants record CSV."""
+    return str(APP_DIR / "previous_tenants.csv")
 
 
 def migrate_forms_add_ocr_keywords():

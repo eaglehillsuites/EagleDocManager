@@ -36,6 +36,8 @@ class ProcessWorker(QObject):
     need_renewal_date = Signal(str)
     need_custom_date = Signal(str)
     duplicate_found = Signal(str, str, str)
+    need_unknown_qr = Signal(str, str)   # qr_text, filename
+    need_preconfirm = Signal(list)       # list of pending result dicts
 
     def __init__(self, folder: str, mode: int):
         super().__init__()
@@ -45,6 +47,8 @@ class ProcessWorker(QObject):
         self._renewal_date_result = None
         self._custom_date_result = None
         self._duplicate_result = None
+        self._unknown_qr_result = None
+        self._last_preview_img = None
         self._waiting = threading.Event()
 
     def run(self):
@@ -53,6 +57,7 @@ class ProcessWorker(QObject):
             on_need_renewal_date=self._on_need_renewal_date,
             on_need_custom_date=self._on_need_custom_date,
             on_duplicate=self._on_duplicate,
+            on_unknown_qr=self._on_need_unknown_qr,
             on_progress=lambda msg: self.progress.emit(msg)
         )
         results = process_folder(self.folder, self.mode, processor=processor)
@@ -96,6 +101,16 @@ class ProcessWorker(QObject):
 
     def resolve_duplicate(self, action: str):
         self._duplicate_result = action
+        self._waiting.set()
+
+    def _on_need_unknown_qr(self, qr_text: str, filename: str):
+        self._waiting.clear()
+        self.need_unknown_qr.emit(qr_text, filename)
+        self._waiting.wait(timeout=120)
+        return self._unknown_qr_result
+
+    def resolve_unknown_qr(self, result):
+        self._unknown_qr_result = result
         self._waiting.set()
 
 
@@ -224,7 +239,7 @@ class MainWindow(QMainWindow):
 
     def _on_process_folder(self, folder: str, mode: int):
         """Start processing a folder in background."""
-        if self._worker_thread and self._worker_thread.isRunning():
+        if self._worker_thread is not None and self._worker_thread.isRunning():
             QMessageBox.warning(self, "Busy", "Processing is already in progress.")
             return
 
@@ -239,6 +254,7 @@ class MainWindow(QMainWindow):
         self._worker.need_renewal_date.connect(self._show_renewal_date_dialog)
         self._worker.need_custom_date.connect(self._show_custom_date_dialog)
         self._worker.duplicate_found.connect(self._show_duplicate_dialog)
+        self._worker.need_unknown_qr.connect(self._show_unknown_qr_dialog)
 
         self._worker_thread.started.connect(self._worker.run)
         self._worker_thread.start()
@@ -251,8 +267,13 @@ class MainWindow(QMainWindow):
     @Slot(list)
     def _on_processing_finished(self, results: list):
         self.status_bar.showMessage("Processing complete.")
-        self._worker_thread.quit()
-        self._worker_thread.wait()
+
+        # Cleanly stop and discard the thread/worker so a new batch can start
+        if self._worker_thread:
+            self._worker_thread.quit()
+            self._worker_thread.wait(5000)
+        self._worker_thread = None
+        self._worker = None
 
         # Check for out-inspection
         out_inspections = [r for r in results if r.get("form_type", "").lower() == "out-inspection"]
@@ -282,6 +303,14 @@ class MainWindow(QMainWindow):
                 from processor.mover import move_unit_folder_to_previous
                 from processor.undo_manager import record_unit_folder_move
                 try:
+                    # Record before moving (while files still exist for date extraction)
+                    from processor.previous_tenant_recorder import record_previous_tenant
+                    record_previous_tenant(
+                        tenant_name=tenant_name,
+                        unit_id=unit,
+                        unit_folder=unit_folder,
+                        new_previous_folder=""   # filled in after move
+                    )
                     new_folder = move_unit_folder_to_previous(
                         unit_folder=unit_folder,
                         previous_tenants_root=prev_path,
@@ -293,6 +322,22 @@ class MainWindow(QMainWindow):
                         original_unit_folder=unit_folder,
                         new_unit_folder=new_folder
                     )
+                    # Update the CSV record with the actual destination
+                    from processor.previous_tenant_recorder import record_previous_tenant
+                    from pathlib import Path as _Path
+                    import csv as _csv, config_manager as _cm
+                    csv_path = _cm.get_previous_tenant_csv()
+                    if _Path(csv_path).exists():
+                        import csv as _csv2
+                        rows = []
+                        with open(csv_path, newline="", encoding="utf-8") as _f:
+                            rows = list(_csv2.DictReader(_f))
+                        if rows:
+                            rows[-1]["previous_folder"] = new_folder
+                            with open(csv_path, "w", newline="", encoding="utf-8") as _f:
+                                w = _csv2.DictWriter(_f, fieldnames=rows[0].keys())
+                                w.writeheader()
+                                w.writerows(rows)
                     self.status_bar.showMessage(
                         f"Unit {unit} moved to Previous Tenants as '{tenant_name}'"
                     )
@@ -304,15 +349,29 @@ class MainWindow(QMainWindow):
 
     @Slot(object, str)
     def _show_form_type_dialog(self, image, filename: str):
+        # Cache preview for renewal date dialog
+        if self._worker:
+            self._worker._last_preview_img = image
         dialog = FormTypeDialog(preview_image=image, filename=filename, parent=self)
         if dialog.exec():
-            self._worker.resolve_form_type(dialog.get_form_type())
+            form_type = dialog.get_form_type()
+            self._worker.resolve_form_type(form_type)
         else:
             self._worker.resolve_form_type("")
 
+    @Slot(object, str)
+    def _show_unknown_qr_dialog(self, qr_text: str, filename: str):
+        """Handle unknown QR codes — connect to existing form or create new route."""
+        from ui.unknown_qr_dialog import UnknownQRDialog
+        dialog = UnknownQRDialog(qr_text=qr_text, filename=filename, parent=self)
+        if dialog.exec():
+            result = dialog.get_result()
+            self._worker.resolve_unknown_qr(result)
+        else:
+            self._worker.resolve_unknown_qr(None)
+
     @Slot(str)
     def _show_renewal_date_dialog(self, form_name: str):
-        # Get the date format from the form's naming profile
         cfg_forms = config_manager.load_forms()
         date_format = "mmmYYYY"
         for f in cfg_forms:
@@ -322,10 +381,18 @@ class MainWindow(QMainWindow):
                     date_format = profile.get("date_format", "mmmYYYY")
                 break
 
-        dialog = RenewalDateDialog(date_format=date_format, form_name=form_name, parent=self)
+        # Pass last-seen preview image so the dialog can show the form
+        preview_img = getattr(self._worker, "_last_preview_img", None)
+        dialog = RenewalDateDialog(
+            date_format=date_format,
+            form_name=form_name,
+            preview_image=preview_img,
+            parent=self
+        )
         if dialog.exec():
             self._worker.resolve_renewal_date(dialog.get_value())
         else:
+            # Must always resolve — never leave worker blocked
             self._worker.resolve_renewal_date("")
 
     @Slot(str)

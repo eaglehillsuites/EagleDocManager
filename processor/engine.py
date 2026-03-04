@@ -10,7 +10,7 @@ from datetime import datetime
 from typing import Optional, Callable
 
 import config_manager
-from processor.barcode_reader import scan_page_for_codes, parse_qr_unit, is_separator_page
+from processor.barcode_reader import scan_page_for_codes, parse_qr_unit, is_separator_page, is_building_level_unit
 from processor.splitter import split_pdf, extract_segment_to_pdf, archive_original, DocumentSegment
 from processor.naming_engine import build_filename, needs_renewal_date, needs_custom_date, determine_destination_folder
 from processor.duplicate_checker import check_duplicate, generate_numbered_names, DuplicateCheckResult
@@ -71,12 +71,16 @@ class DocumentProcessor:
                  on_need_renewal_date: Optional[Callable] = None,
                  on_need_custom_date: Optional[Callable] = None,
                  on_duplicate: Optional[Callable] = None,
+                 on_unknown_qr: Optional[Callable] = None,
+                 on_preconfirm: Optional[Callable] = None,
                  on_progress: Optional[Callable] = None):
 
         self.on_need_form_type = on_need_form_type
         self.on_need_renewal_date = on_need_renewal_date
         self.on_need_custom_date = on_need_custom_date
         self.on_duplicate = on_duplicate
+        self.on_unknown_qr = on_unknown_qr
+        self.on_preconfirm = on_preconfirm
         self.on_progress = on_progress
 
     def _log(self, msg: str):
@@ -218,7 +222,29 @@ class DocumentProcessor:
         result.scan_mode = scan_mode
 
         # Get unit from QR
+        # segment.qr_unit is pre-parsed; segment.raw_qr holds the original string
         unit = segment.qr_unit or ""
+        if not unit and getattr(segment, "raw_qr", None):
+            # Unknown QR — check persistent routes first
+            raw = segment.raw_qr
+            cfg_routes = config.get("qr_routes", {})
+            if raw in cfg_routes:
+                unit = raw   # determine_destination_folder will resolve via qr_routes
+            elif self.on_unknown_qr:
+                self._log(f"Unknown QR code: {raw}")
+                resolution = self.on_unknown_qr(raw, Path(pdf_path).name)
+                if resolution:
+                    if resolution.get("action") == "route":
+                        import config_manager as _cm2
+                        _cm2.save_qr_route(raw, resolution["folder"])
+                        # Reload config to pick up new route
+                        config = config_manager.load_config()
+                        unit = raw
+                    elif resolution.get("action") == "form":
+                        # Use the chosen form's routing (unit stays empty, form identified below)
+                        form_override = resolution.get("form")
+                        if form_override:
+                            pass   # form_override handled below if unit stays empty
         result.unit = unit
 
         # Get form type from Data Matrix
@@ -290,12 +316,20 @@ class DocumentProcessor:
 
         if profile:
             if needs_renewal_date(profile) and self.on_need_renewal_date:
-                renewal_date = self.on_need_renewal_date(form_name)
-                date_values["renewal"] = renewal_date or ""
+                try:
+                    renewal_date = self.on_need_renewal_date(form_name)
+                    date_values["renewal"] = renewal_date or ""
+                except Exception as _re:
+                    self._log(f"Renewal date callback error: {_re}")
+                    date_values["renewal"] = ""
 
             if needs_custom_date(profile) and self.on_need_custom_date:
-                custom_date = self.on_need_custom_date(form_name)
-                date_values["custom"] = custom_date or ""
+                try:
+                    custom_date = self.on_need_custom_date(form_name)
+                    date_values["custom"] = custom_date or ""
+                except Exception as _ce:
+                    self._log(f"Custom date callback error: {_ce}")
+                    date_values["custom"] = ""
 
         # Build filename
         if form:

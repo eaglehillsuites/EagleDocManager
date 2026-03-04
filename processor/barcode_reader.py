@@ -92,6 +92,10 @@ def parse_qr_unit(qr_value: str) -> Optional[str]:
     """
     Parses QR value in format: BLDG:216|UNIT:101
     Returns formatted string like "101-216" or None.
+
+    Special cases:
+    - UNIT:0  → building-level file, returns "BLDG:<bldg>" e.g. "BLDG:216"
+    - No BLDG/UNIT keys → returns None (custom QR, handled separately)
     """
     if not qr_value:
         return None
@@ -103,13 +107,29 @@ def parse_qr_unit(qr_value: str) -> Optional[str]:
                 parts[key.strip().upper()] = val.strip()
         unit = parts.get("UNIT")
         bldg = parts.get("BLDG")
+        if bldg and unit == "0":
+            return f"BLDG:{bldg}"   # building-level marker
         if unit and bldg:
             return f"{unit}-{bldg}"
         elif unit:
             return unit
+        elif bldg:
+            return f"BLDG:{bldg}"
     except Exception:
         pass
-    return qr_value  # Return raw value as fallback
+    return None   # Unknown QR format — caller handles
+
+
+def is_building_level_unit(unit_str: str) -> bool:
+    """Return True for building-level markers like 'BLDG:216'."""
+    return unit_str is not None and unit_str.startswith("BLDG:")
+
+
+def get_building_number(unit_str: str) -> str:
+    """Extract building number from 'BLDG:216' → '216'."""
+    if unit_str and unit_str.startswith("BLDG:"):
+        return unit_str[5:]
+    return ""
 
 
 def is_separator_page(dm_value: str) -> bool:

@@ -17,25 +17,17 @@ from PySide6.QtCore import Qt, QDate, Signal, QPoint
 
 class CalendarPopup(QDialog):
     """
-    Frameless, always-on-top dialog containing a QCalendarWidget.
-    
-    Key design decisions that make this reliable on Windows:
-    - Inherits QDialog (not QWidget) — gets proper window management
-    - Qt.Tool keeps it out of the taskbar and above its parent
-    - Qt.FramelessWindowHint removes the title bar
-    - WA_DeleteOnClose is NOT set — we hide and reuse
-    - Parent is always passed — prevents garbage collection
-    - hide() is called, never close() — avoids WA_DeleteOnClose triggering
+    Frameless calendar popup.
+
+    Uses Qt.Popup which gives native "click anywhere outside to close" on all
+    platforms. WA_DeleteOnClose is explicitly disabled so we can reuse the
+    instance. Parent must always be passed to prevent garbage collection.
     """
 
     date_selected = Signal(date)
 
     def __init__(self, parent):
-        super().__init__(
-            parent,
-            Qt.Tool | Qt.FramelessWindowHint | Qt.NoDropShadowWindowHint
-        )
-        # Never auto-delete
+        super().__init__(parent, Qt.Popup | Qt.FramelessWindowHint)
         self.setAttribute(Qt.WA_DeleteOnClose, False)
 
         layout = QVBoxLayout(self)
@@ -125,7 +117,4 @@ class CalendarPopup(QDialog):
         else:
             super().keyPressEvent(event)
 
-    def focusOutEvent(self, event):
-        """Hide when focus moves away (click outside)."""
-        self.hide()
-        super().focusOutEvent(event)
+    # Qt.Popup handles click-outside-to-close natively

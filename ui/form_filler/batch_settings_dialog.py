@@ -123,6 +123,11 @@ class _DateField(QWidget):
             self._btn.setEnabled(True)
             self._input.setFocus()
             self._input.selectAll()
+        else:
+            # Explicitly re-apply locked style in case Qt cleared it during the msgbox
+            self._input.setReadOnly(True)
+            self._input.setStyleSheet(_STYLE_LOCKED)
+            self._btn.setEnabled(False)
 
     # ── Calendar ──────────────────────────────────────────────
 

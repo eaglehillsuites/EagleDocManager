@@ -157,16 +157,74 @@ def build_filename(form: dict, unit: str, date_values: dict = None) -> str:
     return engine.build()
 
 
+# Building number to subfolder name under tenant_root.
+# Add entries here as buildings are added.
+BUILDING_FOLDER_NAMES = {
+    "216": "216 Nadia",
+    "282": "282 Nadia",
+}
+
+
 def determine_destination_folder(config: dict, unit_str: str) -> str:
     """
-    Determine the destination folder for a unit string like "101-216".
-    Creates folder if it doesn't exist.
-    Returns the full path.
+    Determine the destination folder.
+
+    Tenant unit  (e.g. "101-216"):  <tenant_root>/<bldg folder>/<unit>
+    Building file (e.g. "BLDG:216"): <building_files_path>/<bldg folder>
+    Custom QR     (looked up in qr_routes): path from config
+    Fallback:     tenant_root/unit_str
     """
+    import config_manager as _cm
+    from processor.barcode_reader import is_building_level_unit, get_building_number
+
+    if not unit_str:
+        return ""
+
+    # Building-level file: BLDG:216|UNIT:0
+    if is_building_level_unit(unit_str):
+        bldg_num = get_building_number(unit_str)
+        bldg_files_root = config.get("building_files_path", "")
+        if not bldg_files_root:
+            # Fall back to tenant_root/<bldg folder>
+            bldg_files_root = config.get("tenant_root", "")
+        if bldg_files_root:
+            bldg_folder = BUILDING_FOLDER_NAMES.get(bldg_num, bldg_num + " Nadia")
+            folder = Path(bldg_files_root) / bldg_folder
+            folder.mkdir(parents=True, exist_ok=True)
+            return str(folder)
+        return ""
+
+    # Custom QR route
+    custom = _cm.get_qr_route(unit_str)
+    if custom:
+        Path(custom).mkdir(parents=True, exist_ok=True)
+        return custom
+
+    # Normal tenant unit: "101-216"
     tenant_root = config.get("tenant_root", "")
     if not tenant_root:
         return ""
 
-    folder = Path(tenant_root) / unit_str
+    parts = unit_str.rsplit("-", 1)
+    if len(parts) == 2:
+        unit_num, bldg_num = parts[0], parts[1]
+        bldg_folder = BUILDING_FOLDER_NAMES.get(bldg_num, bldg_num + " Nadia")
+        folder = Path(tenant_root) / bldg_folder / unit_num
+    else:
+        folder = Path(tenant_root) / unit_str
+
     folder.mkdir(parents=True, exist_ok=True)
     return str(folder)
+
+
+def get_unit_folder_path(config: dict, unit_str: str) -> str:
+    """Return the expected unit folder path without creating it."""
+    tenant_root = config.get("tenant_root", "")
+    if not tenant_root:
+        return ""
+    parts = unit_str.rsplit("-", 1)
+    if len(parts) == 2:
+        unit_num, bldg_num = parts[0], parts[1]
+        bldg_folder = BUILDING_FOLDER_NAMES.get(bldg_num, bldg_num + " Nadia")
+        return str(Path(tenant_root) / bldg_folder / unit_num)
+    return str(Path(tenant_root) / unit_str)
