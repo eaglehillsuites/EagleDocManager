@@ -21,7 +21,8 @@ class DocumentSegment:
     def __init__(self):
         self.page_indices: list[int] = []
         self.qr_unit: Optional[str] = None
-        self.raw_qr: Optional[str] = None    # original undecoded QR string
+        self.raw_qr: Optional[str] = None        # original undecoded QR string
+        self.qr_diagnosis: str = ""              # why QR detection failed (empty = success)
         self.datamatrix_value: Optional[str] = None
 
     def is_valid(self) -> bool:
@@ -64,9 +65,10 @@ def _split_mode1(pages_images, total_pages) -> list[DocumentSegment]:
     seg.page_indices = list(range(total_pages))
 
     codes = scan_page_for_codes(pages_images[0])
-    seg.raw_qr = codes["qr"]
-    seg.qr_unit = parse_qr_unit(codes["qr"]) if codes["qr"] else None
-    seg.datamatrix_value = codes["datamatrix"]
+    seg.raw_qr = codes.get("qr")
+    seg.qr_diagnosis = codes.get("diagnosis", "")
+    seg.qr_unit = parse_qr_unit(codes["qr"]) if codes.get("qr") else None
+    seg.datamatrix_value = codes.get("datamatrix")
 
     return [seg]
 
@@ -87,9 +89,10 @@ def _split_mode2(pages_images, total_pages) -> list[DocumentSegment]:
                 segments.append(current_seg)
             current_seg = DocumentSegment()
             current_seg.page_indices.append(i)
-            current_seg.raw_qr = codes["qr"]
-            current_seg.qr_unit = parse_qr_unit(codes["qr"]) if codes["qr"] else None
-            current_seg.datamatrix_value = codes["datamatrix"]
+            current_seg.raw_qr = codes.get("qr")
+            current_seg.qr_diagnosis = codes.get("diagnosis", "")
+            current_seg.qr_unit = parse_qr_unit(codes["qr"]) if codes.get("qr") else None
+            current_seg.datamatrix_value = codes.get("datamatrix")
         else:
             if current_seg is None:
                 # Pages before any code found - create a segment without codes

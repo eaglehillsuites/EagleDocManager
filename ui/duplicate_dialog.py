@@ -88,17 +88,38 @@ class DuplicateDialog(QDialog):
         # Options
         options_frame = QFrame()
         options_frame.setFrameShape(QFrame.StyledPanel)
+        options_frame.setStyleSheet("QFrame { background: #f8f9fa; border: 1px solid #dee2e6; border-radius: 6px; }")
         options_layout = QVBoxLayout(options_frame)
+        options_layout.setSpacing(6)
         options_layout.addWidget(QLabel("<b>Choose an action:</b>"))
 
         self.btn_group = QButtonGroup(self)
 
+        radio_style = """
+            QRadioButton {
+                padding: 8px 10px;
+                border-radius: 4px;
+                font-size: 13px;
+            }
+            QRadioButton:checked {
+                background-color: #cfe2ff;
+                border: 1px solid #2c7be5;
+                color: #0a3678;
+                font-weight: bold;
+            }
+            QRadioButton:hover:!checked {
+                background-color: #e9ecef;
+            }
+            QRadioButton::indicator { width: 14px; height: 14px; }
+        """
+
         self.radio_replace = QRadioButton("Replace existing file with incoming file")
         self.radio_skip = QRadioButton("Skip incoming file (leave in source folder)")
-        self.radio_number = QRadioButton(
-            'Rename both: existing → "(1)", incoming → "(2)"'
-        )
+        self.radio_number = QRadioButton('Rename both: existing → "(1)", incoming → "(2)"')
         self.radio_skip.setChecked(True)
+
+        for radio in (self.radio_replace, self.radio_skip, self.radio_number):
+            radio.setStyleSheet(radio_style)
 
         self.btn_group.addButton(self.radio_replace, 0)
         self.btn_group.addButton(self.radio_skip, 1)

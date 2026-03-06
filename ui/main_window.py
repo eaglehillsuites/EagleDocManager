@@ -22,6 +22,7 @@ from ui.completion_dialog import CompletionDialog
 from ui.duplicate_dialog import DuplicateDialog
 from ui.date_popups import RenewalDateDialog, CustomDateDialog, FormTypeDialog
 from ui.out_inspection_dialog import OutInspectionDialog
+from ui.pick_destination_dialog import PickDestinationDialog
 
 
 # ─────────────────────────────────────────
@@ -32,12 +33,13 @@ class ProcessWorker(QObject):
     """Runs document processing in a background thread."""
     progress = Signal(str)
     finished = Signal(list)  # List of result dicts
-    need_form_type = Signal(object, str)  # image, filename -> blocks
-    need_renewal_date = Signal(str)
+    need_form_type = Signal(object, str, str)  # image, filename, ocr_text
+    need_renewal_date = Signal(str, object)  # form_name, preview_image
     need_custom_date = Signal(str)
     duplicate_found = Signal(str, str, str)
     need_unknown_qr = Signal(str, str)   # qr_text, filename
     need_preconfirm = Signal(list)       # list of pending result dicts
+    need_destination = Signal(str, str, object, str)  # filename, reason, preview, proposed_fname
 
     def __init__(self, folder: str, mode: int):
         super().__init__()
@@ -48,30 +50,49 @@ class ProcessWorker(QObject):
         self._custom_date_result = None
         self._duplicate_result = None
         self._unknown_qr_result = None
+        self._destination_result = None
         self._last_preview_img = None
         self._waiting = threading.Event()
 
     def run(self):
-        processor = DocumentProcessor(
-            on_need_form_type=self._on_need_form_type,
-            on_need_renewal_date=self._on_need_renewal_date,
-            on_need_custom_date=self._on_need_custom_date,
-            on_duplicate=self._on_duplicate,
-            on_unknown_qr=self._on_need_unknown_qr,
-            on_progress=lambda msg: self.progress.emit(msg)
-        )
-        results = process_folder(self.folder, self.mode, processor=processor)
-        self.finished.emit([r.to_dict() for r in results])
+        try:
+            processor = DocumentProcessor(
+                on_need_form_type=self._on_need_form_type,
+                on_need_renewal_date=self._on_need_renewal_date,
+                on_need_custom_date=self._on_need_custom_date,
+                on_duplicate=self._on_duplicate,
+                on_unknown_qr=self._on_need_unknown_qr,
+                on_need_destination=self._on_need_destination,
+                on_progress=lambda msg: self.progress.emit(msg)
+            )
+            results = process_folder(self.folder, self.mode, processor=processor)
+            self.finished.emit([r.to_dict() for r in results])
+        except Exception as e:
+            import traceback
+            tb = traceback.format_exc()
+            self.progress.emit(f"ERROR during processing: {e}")
+            self.progress.emit(tb)
+            error_result = {
+                "original_file": self.folder,
+                "generated_file": "", "generated_path": "",
+                "unit": "", "form_type": "",
+                "scan_mode": self.mode,
+                "action": "Error",
+                "notes": f"Unexpected error: {e}",
+                "source_folder": self.folder,
+            }
+            self.finished.emit([error_result])
 
-    def _on_need_form_type(self, image, filename: str) -> str:
+    def _on_need_form_type(self, image, filename: str, ocr_text: str = "") -> str:
         self._waiting.clear()
-        self.need_form_type.emit(image, filename)
+        self.need_form_type.emit(image, filename, ocr_text)
         self._waiting.wait(timeout=120)
         return self._form_type_result or ""
 
-    def _on_need_renewal_date(self, form_name: str) -> str:
+    def _on_need_renewal_date(self, form_name: str, preview_img=None) -> str:
+        self._last_preview_img = preview_img
         self._waiting.clear()
-        self.need_renewal_date.emit(form_name)
+        self.need_renewal_date.emit(form_name, preview_img)
         self._waiting.wait(timeout=120)
         return self._renewal_date_result or ""
 
@@ -111,6 +132,22 @@ class ProcessWorker(QObject):
 
     def resolve_unknown_qr(self, result):
         self._unknown_qr_result = result
+        self._waiting.set()
+
+    def _on_need_destination(self, filename: str, reason: str,
+                              preview_image, proposed_filename: str) -> dict | None:
+        self._destination_result = None
+        self._waiting.clear()
+        self.need_destination.emit(filename, reason, preview_image, proposed_filename)
+        self._waiting.wait(timeout=300)
+        return self._destination_result
+
+    def resolve_destination(self, result):
+        self._destination_result = result
+        self._waiting.set()
+
+    def unblock(self):
+        """Safety valve: unblock a stuck wait (called on error or close)."""
         self._waiting.set()
 
 
@@ -255,6 +292,7 @@ class MainWindow(QMainWindow):
         self._worker.need_custom_date.connect(self._show_custom_date_dialog)
         self._worker.duplicate_found.connect(self._show_duplicate_dialog)
         self._worker.need_unknown_qr.connect(self._show_unknown_qr_dialog)
+        self._worker.need_destination.connect(self._show_pick_destination_dialog)
 
         self._worker_thread.started.connect(self._worker.run)
         self._worker_thread.start()
@@ -347,12 +385,12 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(self, "No Path",
                                     "Previous Tenants path not configured in General settings.")
 
-    @Slot(object, str)
-    def _show_form_type_dialog(self, image, filename: str):
-        # Cache preview for renewal date dialog
+    @Slot(object, str, str)
+    def _show_form_type_dialog(self, image, filename: str, ocr_text: str = ""):
         if self._worker:
             self._worker._last_preview_img = image
-        dialog = FormTypeDialog(preview_image=image, filename=filename, parent=self)
+        dialog = FormTypeDialog(preview_image=image, filename=filename,
+                                ocr_text=ocr_text, parent=self)
         if dialog.exec():
             form_type = dialog.get_form_type()
             self._worker.resolve_form_type(form_type)
@@ -370,8 +408,8 @@ class MainWindow(QMainWindow):
         else:
             self._worker.resolve_unknown_qr(None)
 
-    @Slot(str)
-    def _show_renewal_date_dialog(self, form_name: str):
+    @Slot(str, object)
+    def _show_renewal_date_dialog(self, form_name: str, preview_img=None):
         cfg_forms = config_manager.load_forms()
         date_format = "mmmYYYY"
         for f in cfg_forms:
@@ -380,9 +418,6 @@ class MainWindow(QMainWindow):
                 if profile:
                     date_format = profile.get("date_format", "mmmYYYY")
                 break
-
-        # Pass last-seen preview image so the dialog can show the form
-        preview_img = getattr(self._worker, "_last_preview_img", None)
         dialog = RenewalDateDialog(
             date_format=date_format,
             form_name=form_name,
@@ -392,7 +427,6 @@ class MainWindow(QMainWindow):
         if dialog.exec():
             self._worker.resolve_renewal_date(dialog.get_value())
         else:
-            # Must always resolve — never leave worker blocked
             self._worker.resolve_renewal_date("")
 
     @Slot(str)
@@ -417,6 +451,21 @@ class MainWindow(QMainWindow):
         )
         dialog.exec()
         self._worker.resolve_duplicate(dialog.get_action())
+
+    @Slot(str, str, object, str)
+    def _show_pick_destination_dialog(self, filename: str, reason: str,
+                                      preview_image, proposed_filename: str):
+        dialog = PickDestinationDialog(
+            filename=filename,
+            reason=reason,
+            preview_image=preview_image,
+            proposed_filename=proposed_filename,
+            parent=self
+        )
+        if dialog.exec():
+            self._worker.resolve_destination(dialog.get_result())
+        else:
+            self._worker.resolve_destination(None)
 
     def closeEvent(self, event):
         if self._watcher:

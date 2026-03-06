@@ -85,9 +85,13 @@ def perform_undo(entries_to_undo: list) -> list[str]:
             except Exception as e:
                 messages.append(f"Could not restore {source_filename}: {e}")
         elif source_folder and source_filename:
-            # For mode 1 (no splitting), the file was moved directly
-            # Try to restore from generated location back to source folder
-            messages.append(f"Note: Original {source_filename} could not be restored from archive")
+            # Scan mode 1 (single page, no split) — original was never archived,
+            # it remains in the source folder. Nothing to restore.
+            orig = Path(source_folder) / source_filename
+            if orig.exists():
+                messages.append(f"Original retained in source folder: {source_filename}")
+            else:
+                messages.append(f"Note: {source_filename} is no longer in the source folder")
 
         # Step 3: Reverse unit folder move if applicable
         if entry.get("unit_folder_moved"):

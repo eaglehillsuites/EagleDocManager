@@ -68,7 +68,7 @@ class RenewalDateDialog(QDialog):
 
         # ── Optional form preview on the left ─────────────────
         if self.preview_image is not None:
-            px = _pil_to_pixmap(self.preview_image, max_width=320)
+            px = _pil_to_pixmap(self.preview_image, max_width=460)
             if px:
                 frame = QFrame()
                 frame.setFrameShape(QFrame.Box)
@@ -82,7 +82,7 @@ class RenewalDateDialog(QDialog):
                 img_lbl = QLabel()
                 img_lbl.setPixmap(px)
                 scroll.setWidget(img_lbl)
-                scroll.setFixedSize(px.width() + 12, min(px.height() + 12, 520))
+                scroll.setFixedSize(px.width() + 12, min(px.height() + 12, 660))
 
                 fl.addWidget(scroll)
                 outer.addWidget(frame)
@@ -174,10 +174,11 @@ class RenewalDateDialog(QDialog):
         if self.selected_month and self.selected_year:
             dt = datetime(self.selected_year, self.selected_month, 1)
             r = self.date_format
-            r = r.replace("yyyy", dt.strftime("%Y")).replace("YYYY", dt.strftime("%Y"))
-            r = r.replace("mm", dt.strftime("%m")).replace("dd", dt.strftime("%d"))
+            # Replace longer tokens first to prevent partial matches
             r = r.replace("mmm", MONTH_SHORT[dt.month - 1])
             r = r.replace("MMM", MONTH_SHORT[dt.month - 1])
+            r = r.replace("YYYY", dt.strftime("%Y")).replace("yyyy", dt.strftime("%Y"))
+            r = r.replace("mm", dt.strftime("%m")).replace("dd", dt.strftime("%d"))
             self.result_value = r
             self.accept()
 
@@ -226,9 +227,20 @@ class CustomDateDialog(QDialog):
 
 
 class FormTypeDialog(QDialog):
-    def __init__(self, preview_image=None, filename: str = "", parent=None):
+    """
+    Shown when a form type cannot be identified automatically.
+
+    When the user confirms:
+    - If OCR text is available, the program extracts candidate keywords
+      and automatically saves them to the chosen form's ocr_keywords list.
+    - This means the same form will be auto-recognised next time.
+    """
+
+    def __init__(self, preview_image=None, filename: str = "",
+                 ocr_text: str = "", parent=None):
         super().__init__(parent)
         self.result_form_type = ""
+        self._ocr_text = ocr_text
         self.setWindowTitle("Unknown Form Type")
         self.setModal(True)
         self.setMinimumWidth(500)
@@ -243,10 +255,14 @@ class FormTypeDialog(QDialog):
         if preview_image is not None:
             px = _pil_to_pixmap(preview_image, max_width=450)
             if px:
+                scroll = QScrollArea()
+                scroll.setWidgetResizable(False)
+                scroll.setFrameShape(QFrame.NoFrame)
                 lbl = QLabel()
                 lbl.setPixmap(px)
-                lbl.setAlignment(Qt.AlignCenter)
-                layout.addWidget(lbl)
+                scroll.setWidget(lbl)
+                scroll.setFixedHeight(min(px.height() + 8, 400))
+                layout.addWidget(scroll)
 
         forms = config_manager.load_forms()
         self.combo = QComboBox()
@@ -262,13 +278,37 @@ class FormTypeDialog(QDialog):
         self.custom_input.textChanged.connect(self._check)
         layout.addWidget(self.custom_input)
 
+        # Keyword auto-save notice (only show when OCR text is available)
+        if self._ocr_text.strip():
+            from processor.ocr_reader import extract_candidate_keywords
+            kws = extract_candidate_keywords(self._ocr_text)
+            if kws:
+                self._auto_keywords = kws
+                kw_lbl = QLabel(
+                    f"<small><b>Auto-detected keywords:</b> "
+                    f"{', '.join(kws)}<br>"
+                    "These will be saved to the selected form type so it is "
+                    "recognised automatically next time.</small>"
+                )
+                kw_lbl.setWordWrap(True)
+                kw_lbl.setStyleSheet(
+                    "background: #e8f4f8; border: 1px solid #bee5eb; "
+                    "border-radius: 4px; padding: 6px; color: #0c5460;"
+                )
+                layout.addWidget(kw_lbl)
+            else:
+                self._auto_keywords = []
+        else:
+            self._auto_keywords = []
+
         row = QHBoxLayout()
         skip = QPushButton("Skip This File")
         skip.clicked.connect(self.reject)
         self.ok_btn = QPushButton("Confirm")
         self.ok_btn.setEnabled(False)
         self.ok_btn.setStyleSheet("""
-            QPushButton:enabled { background:#2c7be5; color:white; border-radius:4px; font-weight:bold; }
+            QPushButton:enabled { background:#2c7be5; color:white;
+                                  border-radius:4px; font-weight:bold; }
             QPushButton:disabled { background:#ced4da; }
         """)
         self.ok_btn.clicked.connect(self._confirm)
@@ -290,6 +330,28 @@ class FormTypeDialog(QDialog):
             self.result_form_type = self.combo.currentText()
         else:
             self.result_form_type = self.custom_input.text().strip()
+
+        # Auto-save keywords to chosen form type
+        if self._auto_keywords and self.result_form_type:
+            try:
+                import config_manager
+                forms = config_manager.load_forms()
+                for i, f in enumerate(forms):
+                    if f["name"].lower() == self.result_form_type.lower():
+                        existing = f.get("ocr_keywords", [])
+                        # Add keywords not already present
+                        new_kws = [kw for kw in self._auto_keywords
+                                   if kw not in existing and
+                                   not any(kw in grp if isinstance(grp, list)
+                                           else kw == grp
+                                           for grp in existing)]
+                        if new_kws:
+                            forms[i]["ocr_keywords"] = existing + new_kws
+                            config_manager.save_forms(forms)
+                        break
+            except Exception:
+                pass  # Don't let keyword saving crash the dialog
+
         self.accept()
 
     def get_form_type(self) -> str:

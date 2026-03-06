@@ -73,6 +73,7 @@ class DocumentProcessor:
                  on_duplicate: Optional[Callable] = None,
                  on_unknown_qr: Optional[Callable] = None,
                  on_preconfirm: Optional[Callable] = None,
+                 on_need_destination: Optional[Callable] = None,
                  on_progress: Optional[Callable] = None):
 
         self.on_need_form_type = on_need_form_type
@@ -81,6 +82,7 @@ class DocumentProcessor:
         self.on_duplicate = on_duplicate
         self.on_unknown_qr = on_unknown_qr
         self.on_preconfirm = on_preconfirm
+        self.on_need_destination = on_need_destination
         self.on_progress = on_progress
 
     def _log(self, msg: str):
@@ -134,16 +136,26 @@ class DocumentProcessor:
         # Create temp directory for segment extraction
         with tempfile.TemporaryDirectory() as tmpdir:
             for i, segment in enumerate(segments):
-                result = self._process_segment(
-                    segment=segment,
-                    pdf_path=pdf_path,
-                    source_folder=source_folder,
-                    scan_mode=scan_mode,
-                    config=config,
-                    segment_index=i,
-                    total_segments=len(segments),
-                    tmpdir=tmpdir
-                )
+                try:
+                    result = self._process_segment(
+                        segment=segment,
+                        pdf_path=pdf_path,
+                        source_folder=source_folder,
+                        scan_mode=scan_mode,
+                        config=config,
+                        segment_index=i,
+                        total_segments=len(segments),
+                        tmpdir=tmpdir
+                    )
+                except Exception as _seg_err:
+                    import traceback as _tb
+                    self._log(f"Error processing segment {i+1}: {_seg_err}")
+                    self._log(_tb.format_exc())
+                    result = ProcessingResult()
+                    result.original_file = Path(pdf_path).name
+                    result.source_folder = source_folder
+                    result.action = "Error"
+                    result.notes = f"Segment error: {_seg_err}"
                 results.append(result)
 
                 if result.success and not result.skipped:
@@ -220,16 +232,21 @@ class DocumentProcessor:
         result.original_file = Path(pdf_path).name
         result.source_folder = source_folder
         result.scan_mode = scan_mode
+        preview_img = None           # may be set early and reused
+        final_filename_override = None   # set by on_need_destination if user edits filename
 
         # Get unit from QR
-        # segment.qr_unit is pre-parsed; segment.raw_qr holds the original string
+        # segment.qr_unit is pre-parsed; segment.raw_qr holds original string
+        # segment.qr_diagnosis holds why detection failed (empty if succeeded)
         unit = segment.qr_unit or ""
+        qr_diagnosis = getattr(segment, "qr_diagnosis", "")
+
         if not unit and getattr(segment, "raw_qr", None):
-            # Unknown QR — check persistent routes first
+            # Non-standard QR format — check persistent routes first
             raw = segment.raw_qr
             cfg_routes = config.get("qr_routes", {})
             if raw in cfg_routes:
-                unit = raw   # determine_destination_folder will resolve via qr_routes
+                unit = raw
             elif self.on_unknown_qr:
                 self._log(f"Unknown QR code: {raw}")
                 resolution = self.on_unknown_qr(raw, Path(pdf_path).name)
@@ -237,14 +254,35 @@ class DocumentProcessor:
                     if resolution.get("action") == "route":
                         import config_manager as _cm2
                         _cm2.save_qr_route(raw, resolution["folder"])
-                        # Reload config to pick up new route
                         config = config_manager.load_config()
                         unit = raw
                     elif resolution.get("action") == "form":
-                        # Use the chosen form's routing (unit stays empty, form identified below)
                         form_override = resolution.get("form")
-                        if form_override:
-                            pass   # form_override handled below if unit stays empty
+
+        # QR fallback: try to read unit/building from the form body via OCR
+        if not unit:
+            if qr_diagnosis:
+                self._log(f"QR detection failed: {qr_diagnosis}")
+            self._log("Attempting to read unit number from form text via OCR...")
+            if preview_img is None:
+                try:
+                    from pdf2image import convert_from_path as _c2p
+                    _pages = _c2p(pdf_path, dpi=200, first_page=1, last_page=1)
+                    preview_img = _pages[0] if _pages else None
+                except Exception:
+                    pass
+            if preview_img is not None:
+                from processor.ocr_reader import ocr_available, extract_unit_from_ocr
+                if ocr_available():
+                    ocr_unit, ocr_note = extract_unit_from_ocr(preview_img)
+                    if ocr_unit:
+                        unit = ocr_unit
+                        self._log(f"OCR found unit from form text: {unit} ({ocr_note})")
+                    else:
+                        self._log(f"OCR unit extraction: {ocr_note}")
+                else:
+                    self._log("Tesseract not available — cannot read unit from form text")
+
         result.unit = unit
 
         # Get form type from Data Matrix
@@ -253,14 +291,14 @@ class DocumentProcessor:
         form_name = form["name"] if form else None
 
         # Step 2 fallback: OCR title recognition
-        preview_img = None
         if not form_name:
-            from pdf2image import convert_from_path
-            try:
-                pages = convert_from_path(pdf_path, dpi=200, first_page=1, last_page=1)
-                preview_img = pages[0] if pages else None
-            except Exception:
-                preview_img = None
+            if preview_img is None:
+                from pdf2image import convert_from_path
+                try:
+                    pages = convert_from_path(pdf_path, dpi=200, first_page=1, last_page=1)
+                    preview_img = pages[0] if pages else None
+                except Exception:
+                    pass  # leave preview_img as None; OCR will be skipped below
 
             if preview_img is not None:
                 from processor.ocr_reader import match_form_by_ocr, ocr_available
@@ -289,7 +327,18 @@ class DocumentProcessor:
                         pass
 
                 self._log("Asking user for form type...")
-                user_form_type = self.on_need_form_type(preview_img, Path(pdf_path).name)
+                # Pass OCR text so UI can suggest keywords automatically
+                _ocr_text_for_dialog = ""
+                if preview_img is not None:
+                    try:
+                        from processor.ocr_reader import ocr_available, extract_title_text
+                        if ocr_available():
+                            _ocr_text_for_dialog = extract_title_text(preview_img, top_fraction=0.5)
+                    except Exception:
+                        pass
+                user_form_type = self.on_need_form_type(
+                    preview_img, Path(pdf_path).name, _ocr_text_for_dialog
+                )
                 if user_form_type:
                     form_name = user_form_type
                     # Find matching form object if possible
@@ -317,7 +366,7 @@ class DocumentProcessor:
         if profile:
             if needs_renewal_date(profile) and self.on_need_renewal_date:
                 try:
-                    renewal_date = self.on_need_renewal_date(form_name)
+                    renewal_date = self.on_need_renewal_date(form_name, preview_img)
                     date_values["renewal"] = renewal_date or ""
                 except Exception as _re:
                     self._log(f"Renewal date callback error: {_re}")
@@ -343,9 +392,49 @@ class DocumentProcessor:
         # Determine destination
         dest_folder = determine_destination_folder(config, unit)
         if not dest_folder:
-            result.notes = "No tenant root configured"
-            result.action = "Error"
-            return result
+            # Build a clear reason for the user
+            if not config.get("tenant_root", ""):
+                reason = "Tenant Root is not configured in General settings."
+            elif not unit:
+                reason = (
+                    f"No QR code could be read from this document. {qr_diagnosis}\n\n"
+                    "Please select a destination folder manually."
+                )
+            else:
+                reason = f"Could not determine destination folder for unit '{unit}'."
+
+            self._log(f"⚠ No destination: {reason.splitlines()[0]}")
+
+            if self.on_need_destination:
+                # Ask the user to pick a folder; pass preview image and reason
+                if preview_img is None:
+                    try:
+                        from pdf2image import convert_from_path as _c2p
+                        _pages = _c2p(pdf_path, dpi=150, first_page=1, last_page=1)
+                        preview_img = _pages[0] if _pages else None
+                    except Exception:
+                        pass
+                chosen = self.on_need_destination(
+                    filename=Path(pdf_path).name,
+                    reason=reason,
+                    preview_image=preview_img,
+                    proposed_filename=proposed_filename,
+                )
+                if chosen:
+                    dest_folder = chosen.get("folder", "")
+                    # Override proposed filename if user changed it
+                    if chosen.get("filename"):
+                        proposed_filename = chosen["filename"]
+                        final_filename_override = proposed_filename
+                if not dest_folder:
+                    result.notes = reason.splitlines()[0]
+                    result.action = "Skipped (no destination)"
+                    result.skipped = True
+                    return result
+            else:
+                result.notes = reason.splitlines()[0]
+                result.action = "Error"
+                return result
 
         # Duplicate check
         dup_result = check_duplicate(
@@ -355,6 +444,10 @@ class DocumentProcessor:
             form_type=form_name,
             date_str=date_values.get("today", "")
         )
+
+        # Apply any filename override set by on_need_destination
+        if final_filename_override:
+            proposed_filename = final_filename_override
 
         final_filename = proposed_filename
         if dup_result.is_duplicate:
@@ -375,7 +468,6 @@ class DocumentProcessor:
                     result.skipped = True
                     return result
                 elif action == "replace":
-                    import os
                     if Path(dup_result.existing_path).exists():
                         Path(dup_result.existing_path).unlink()
                     final_filename = proposed_filename

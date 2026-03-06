@@ -212,14 +212,13 @@ class CompletionDialog(QDialog):
             if path and Path(path).exists():
                 try:
                     if sys.platform == "win32":
-                        import win32api
-                        win32api.ShellExecute(0, "print", path, None, ".", 0)
+                        os.startfile(path, "print")
                     else:
                         os.system(f'lp "{path}"')
                 except Exception as e:
-                    errors.append(f"{r['generated_file']}: {e}")
+                    errors.append(f"{r.get('generated_file', '?')}: {e}")
             else:
-                errors.append(f"{r.get('generated_file', '?')}: File not found")
+                errors.append(f"{r.get('generated_file', '?')}: File not found at {path}")
 
         if errors:
             QMessageBox.warning(self, "Print Errors", "\n".join(errors))
