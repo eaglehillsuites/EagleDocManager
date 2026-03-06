@@ -119,6 +119,30 @@ def is_connected() -> bool:
         return False
 
 
+def try_silent_reconnect() -> bool:
+    """
+    Attempt to silently refresh an existing token on startup.
+    Returns True if the token is now valid, False if a manual re-auth is needed.
+    Does NOT open a browser window.
+    """
+    try:
+        if not TOKEN_FILE.exists():
+            return False
+        from google.oauth2.credentials import Credentials
+        from google.auth.transport.requests import Request
+        creds = Credentials.from_authorized_user_file(str(TOKEN_FILE), SCOPES)
+        if creds and creds.valid:
+            return True
+        if creds and creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+            with open(TOKEN_FILE, "w") as f:
+                f.write(creds.to_json())
+            return True
+        return False
+    except Exception:
+        return False
+
+
 def disconnect():
     if TOKEN_FILE.exists():
         TOKEN_FILE.unlink()

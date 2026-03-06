@@ -58,6 +58,7 @@ class DashboardWindow(QMainWindow):
 
     open_scanner_requested = Signal()
     open_form_filler_requested = Signal()
+    watcher_toggle_requested = Signal(bool)   # True = start, False = stop
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -118,6 +119,25 @@ class DashboardWindow(QMainWindow):
         """)
         filler_btn.clicked.connect(self.open_form_filler_requested)
         header_row.addWidget(filler_btn)
+
+        # Watcher toggle
+        self._watcher_running = False
+        self._watcher_status_lbl = QLabel("● Watcher: Stopped")
+        self._watcher_status_lbl.setStyleSheet("color: #aaa; font-size: 12px;")
+        header_row.addWidget(self._watcher_status_lbl)
+
+        self._watcher_toggle_btn = QPushButton("▶  Start Watcher")
+        self._watcher_toggle_btn.setFixedHeight(40)
+        self._watcher_toggle_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #28a745; color: white;
+                border-radius: 6px; font-size: 12px;
+                font-weight: bold; padding: 0 14px;
+            }
+            QPushButton:hover { background-color: #218838; }
+        """)
+        self._watcher_toggle_btn.clicked.connect(self._on_watcher_toggle)
+        header_row.addWidget(self._watcher_toggle_btn)
 
         root.addLayout(header_row)
 
@@ -317,3 +337,36 @@ class DashboardWindow(QMainWindow):
         self._viewing_month = date.today().month
         self._viewing_year = date.today().year
         self._refresh()
+
+    def set_watcher_running(self, running: bool):
+        """Called by main.py to keep the dashboard indicator in sync."""
+        self._watcher_running = running
+        if running:
+            self._watcher_status_lbl.setText("● Watcher: Running")
+            self._watcher_status_lbl.setStyleSheet("color: #28a745; font-size: 12px; font-weight: bold;")
+            self._watcher_toggle_btn.setText("⏹  Stop Watcher")
+            self._watcher_toggle_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #dc3545; color: white;
+                    border-radius: 6px; font-size: 12px;
+                    font-weight: bold; padding: 0 14px;
+                }
+                QPushButton:hover { background-color: #c82333; }
+            """)
+        else:
+            self._watcher_status_lbl.setText("● Watcher: Stopped")
+            self._watcher_status_lbl.setStyleSheet("color: #aaa; font-size: 12px;")
+            self._watcher_toggle_btn.setText("▶  Start Watcher")
+            self._watcher_toggle_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #28a745; color: white;
+                    border-radius: 6px; font-size: 12px;
+                    font-weight: bold; padding: 0 14px;
+                }
+                QPushButton:hover { background-color: #218838; }
+            """)
+
+    def _on_watcher_toggle(self):
+        new_state = not self._watcher_running
+        self.watcher_toggle_requested.emit(new_state)
+        self.set_watcher_running(new_state)

@@ -166,16 +166,38 @@ def main():
     import config_manager as _cm
     _cm.migrate_forms_add_ocr_keywords()
 
+    # Silently refresh Gmail token if one exists — must happen before the
+    # watcher starts so auto-scan batches can create drafts immediately.
+    try:
+        from gmail.gmail_client import try_silent_reconnect
+        try_silent_reconnect()
+    except Exception:
+        pass  # Non-fatal; user can reconnect manually from General settings
+
     # Open the dashboard as the main entry point
     _scanner_window = None
     _filler_window = None
 
     dashboard = DashboardWindow()
 
+    def _on_dashboard_watcher_toggle(should_run: bool):
+        """Handle watcher toggle from dashboard — init scanner window if needed."""
+        nonlocal _scanner_window
+        if _scanner_window is None:
+            _scanner_window = MainWindow()
+            _scanner_window.auto_scan_tab.watcher_status_changed.connect(
+                dashboard.set_watcher_running
+            )
+        _scanner_window._on_watcher_control(should_run)
+        dashboard.set_watcher_running(should_run)
+
     def _open_scanner():
         nonlocal _scanner_window
         if _scanner_window is None:
             _scanner_window = MainWindow()
+            _scanner_window.auto_scan_tab.watcher_status_changed.connect(
+                dashboard.set_watcher_running
+            )
         _scanner_window.show()
         _scanner_window.raise_()
         _scanner_window.activateWindow()
@@ -191,7 +213,18 @@ def main():
 
     dashboard.open_scanner_requested.connect(_open_scanner)
     dashboard.open_form_filler_requested.connect(_open_filler)
+    dashboard.watcher_toggle_requested.connect(_on_dashboard_watcher_toggle)
     dashboard.show()
+
+    # Sync initial watcher state to dashboard — watcher auto-starts if folders
+    # are configured, so we need to reflect that without opening the scanner UI.
+    try:
+        import config_manager as _cm2
+        _cfg = _cm2.load_config()
+        if _cfg.get("watched_folders"):
+            dashboard.set_watcher_running(True)
+    except Exception:
+        pass
 
     sys.exit(app.exec())
 

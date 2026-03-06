@@ -212,7 +212,15 @@ class CompletionDialog(QDialog):
             if path and Path(path).exists():
                 try:
                     if sys.platform == "win32":
-                        os.startfile(path, "print")
+                        import subprocess
+                        # Use ShellExecute via subprocess — more reliable than
+                        # win32api for PDFs with any registered viewer
+                        subprocess.run(
+                            ["rundll32.exe",
+                             "shell32.dll,ShellExec_RunDLL",
+                             "print", path],
+                            check=False
+                        )
                     else:
                         os.system(f'lp "{path}"')
                 except Exception as e:

@@ -19,13 +19,28 @@ def record_batch(source_folder: str, source_filename: str,
     generated_files: list of dicts with keys:
       - 'path': full path to the generated file
       - 'filename': just the filename
+    
+    Each generated file entry will have its mtime recorded at the time of
+    registration so undo can verify it is deleting the exact file that was
+    created by this batch and not a pre-existing file with the same name.
     """
+    stamped = []
+    for gf in generated_files:
+        entry_gf = dict(gf)
+        try:
+            p = Path(gf.get("path", ""))
+            if p.exists():
+                entry_gf["mtime"] = p.stat().st_mtime
+        except Exception:
+            pass
+        stamped.append(entry_gf)
+
     entry = {
         "source_folder": source_folder,
         "source_filename": source_filename,
-        "generated_files": generated_files,
+        "generated_files": stamped,
         "archive_path": archive_path,
-        "unit_folder_moved": None,  # Set if Out-Inspection was triggered
+        "unit_folder_moved": None,
         "original_unit_folder": None,
         "new_unit_folder": None,
     }
@@ -54,7 +69,7 @@ def get_recent_entries() -> list:
 def perform_undo(entries_to_undo: list) -> list[str]:
     """
     Perform undo on the given list of undo entries.
-    Returns list of messages about what was restored.
+    Returns list of messages about what was restored/removed.
     """
     messages = []
 
@@ -64,34 +79,42 @@ def perform_undo(entries_to_undo: list) -> list[str]:
         archive_path = entry.get("archive_path")
         generated_files = entry.get("generated_files", [])
 
-        # Step 1: Remove generated files
+        # Step 1: Remove generated files — only if mtime matches what was recorded
         for gf in generated_files:
             path = gf.get("path", "")
-            if path and Path(path).exists():
+            recorded_mtime = gf.get("mtime")
+            if not path:
+                continue
+            p = Path(path)
+            if not p.exists():
+                continue
+            # Guard: only delete if this is the exact file we created
+            if recorded_mtime is not None:
                 try:
-                    Path(path).unlink()
-                    messages.append(f"Removed: {Path(path).name}")
-                except Exception as e:
-                    messages.append(f"Could not remove {path}: {e}")
+                    actual_mtime = p.stat().st_mtime
+                    if abs(actual_mtime - recorded_mtime) > 2:
+                        messages.append(
+                            f"Skipped (file changed since scan): {p.name}"
+                        )
+                        continue
+                except Exception:
+                    pass
+            try:
+                p.unlink()
+                messages.append(f"Removed: {p.name}")
+            except Exception as e:
+                messages.append(f"Could not remove {p.name}: {e}")
 
-        # Step 2: Restore original from archive
+        # Step 2: Restore original from archive (modes 2/3 or multi-segment)
         if archive_path and Path(archive_path).exists():
             try:
                 with zipfile.ZipFile(archive_path, "r") as zf:
                     zf.extract(source_filename, source_folder)
-                messages.append(f"Restored: {source_filename}")
-                # Remove the archive zip
+                messages.append(f"Restored original: {source_filename}")
                 Path(archive_path).unlink()
             except Exception as e:
                 messages.append(f"Could not restore {source_filename}: {e}")
-        elif source_folder and source_filename:
-            # Scan mode 1 (single page, no split) — original was never archived,
-            # it remains in the source folder. Nothing to restore.
-            orig = Path(source_folder) / source_filename
-            if orig.exists():
-                messages.append(f"Original retained in source folder: {source_filename}")
-            else:
-                messages.append(f"Note: {source_filename} is no longer in the source folder")
+        # Mode 1 — original was never moved or archived, nothing to restore.
 
         # Step 3: Reverse unit folder move if applicable
         if entry.get("unit_folder_moved"):
@@ -99,9 +122,10 @@ def perform_undo(entries_to_undo: list) -> list[str]:
             orig_folder = entry.get("original_unit_folder", "")
             if new_folder and Path(new_folder).exists() and orig_folder:
                 try:
-                    import shutil
                     shutil.move(new_folder, orig_folder)
-                    messages.append(f"Reversed folder move: {Path(new_folder).name} → {Path(orig_folder).name}")
+                    messages.append(
+                        f"Reversed folder move: {Path(new_folder).name} → {Path(orig_folder).name}"
+                    )
                 except Exception as e:
                     messages.append(f"Could not reverse folder move: {e}")
 
